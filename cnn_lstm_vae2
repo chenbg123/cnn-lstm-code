@@ -1,0 +1,222 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Flatten, Dense, LSTM, RepeatVector, TimeDistributed, Reshape
+from tensorflow.keras.models import Model
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.decomposition import PCA
+from sklearn.metrics import roc_auc_score, roc_curve
+
+
+
+检查代码是否逻辑有错：import pandas as pd
+
+# 示例数据集（假设包含故障码为1的数据）
+data = {
+    'Feature_1': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    'Feature_2': [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    'Fault_Code': [0, 0, 0, 0, 1, 0, 0, 0, 0, 0]  # 假设故障码为1的数据发生在索引为4的位置
+}
+
+df = pd.DataFrame(data)
+
+# 提取所有故障发生前5秒的数据特征和正常数据特征
+def extract_fault_and_normal_data(df, fault_code_column='Fault_Code', num_pre_fault_points=5):
+    fault_indices = df.index[df[fault_code_column] == 1].tolist()  # 找出所有故障码为1的索引
+    pre_fault_indices = [max(0, idx - num_pre_fault_points + 1) for idx in fault_indices]  # 提取故障发生前5条数据的索引
+    normal_indices = [idx for idx in pre_fault_indices if idx >= 0]  # 过滤掉负索引
+    fault_data = df.iloc[pre_fault_indices]  # 提取故障发生前5条数据的数据
+    normal_data = df.iloc[normal_indices]  # 提取正常数据
+    return normal_data, fault_data
+
+# 提取数据
+normal_data, fault_data = extract_fault_and_normal_data(df)
+
+# 输出结果
+print("Normal Data (5 Rows before Fault):")
+print(normal_data)
+print("\nFault Data:")
+print(fault_data)
+
+
+
+
+
+  
+
+# 生成示例多特征数据
+def generate_sample_multivariate_data(num_features=30):
+    time = np.arange(0, 100, 0.1)
+    data = np.array([np.sin(time + i) + np.random.normal(0, 0.1, len(time)) for i in range(num_features)]).T
+    return data
+
+# 准备数据
+def prepare_multivariate_data(series, n_steps):
+    X, y = [], []
+    for i in range(len(series)):
+        end_ix = i + n_steps
+        if end_ix > len(series) - 1:
+            break
+        seq_x, seq_y = series[i:end_ix, :], series[end_ix, :]
+        X.append(seq_x)
+        y.append(seq_y)
+    return np.array(X), np.array(y)
+
+# 构建CNN-LSTM-VAE模型
+def build_multivariate_model(input_shape):
+    inputs = Input(shape=input_shape)
+
+    # Encoder
+    x = Conv1D(filters=64, kernel_size=2, activation='relu', padding='same')(inputs)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = Conv1D(filters=32, kernel_size=2, activation='relu', padding='same')(x)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = Flatten()(x)
+    x = Dense(50, activation='relu')(x)
+
+    # LSTM Encoder
+    x = RepeatVector(input_shape[0])(x)
+    x = LSTM(100, activation='relu', return_sequences=True)(x)
+
+    # Decoder
+    x = LSTM(100, activation='relu', return_sequences=True)(x)
+    x = TimeDistributed(Dense(input_shape[1]))(x)
+
+    # Output
+    x = TimeDistributed(Dense(input_shape[1]))(x)
+    x = Flatten()(x)
+    outputs = Dense(input_shape[1])(x)
+
+    model = Model(inputs, outputs)
+    model.compile(optimizer='adam', loss='mse')
+    return model
+
+# 交叉验证评估函数
+def evaluate_model(X, y, n_steps, n_components):
+    kf = KFold(n_splits=5)
+    auc_scores = []
+
+    for train_index, test_index in kf.split(X):
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
+
+        # PCA降维
+        pca = PCA(n_components=n_components)
+        X_train_pca = pca.fit_transform(X_train.reshape(-1, X_train.shape[-1]))
+        X_test_pca = pca.transform(X_test.reshape(-1, X_test.shape[-1]))
+
+        X_train_pca = X_train_pca.reshape(X_train.shape[0], n_steps, n_components)
+        X_test_pca = X_test_pca.reshape(X_test.shape[0], n_steps, n_components)
+
+        y_train_pca = pca.transform(y_train)
+        y_test_pca = pca.transform(y_test)
+
+        # 构建和训练模型
+        model = build_multivariate_model((n_steps, n_components))
+        model.fit(X_train_pca, y_train_pca, epochs=10, verbose=0)
+
+        # 预测
+        y_pred = model.predict(X_test_pca)
+
+        # 计算重建误差
+        reconstruction_errors = np.mean(np.abs(y_test_pca - y_pred), axis=1)
+
+        # 设置阈值 (这里假设使用95%分位数作为阈值)
+        threshold = np.percentile(reconstruction_errors, 95)
+
+        # 评估模型
+        y_true = (reconstruction_errors > threshold).astype(int)
+        auc_score = roc_auc_score(y_true, reconstruction_errors)
+        auc_scores.append(auc_score)
+
+    return np.mean(auc_scores)
+
+# 主函数
+def main():
+    # 生成示例多特征数据
+    num_features = 30
+    data = generate_sample_multivariate_data(num_features)
+
+    # 标准化数据
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(data)
+
+    # 准备训练和测试数据
+    n_steps = 10
+    X, y = prepare_multivariate_data(data, n_steps)
+
+    # 寻找最佳的n_components
+    n_components_range = range(5, 21)
+    best_auc = 0
+    best_n_components = 0
+
+    for n_components in n_components_range:
+        auc_score = evaluate_model(X, y, n_steps, n_components)
+        print(f'n_components: {n_components}, AUC Score: {auc_score}')
+        if auc_score > best_auc:
+            best_auc = auc_score
+            best_n_components = n_components
+
+    print(f'Best n_components: {best_n_components}, Best AUC Score: {best_auc}')
+
+    # 使用最佳的n_components进行训练和评估
+    pca = PCA(n_components=best_n_components)
+    data_pca = pca.fit_transform(data)
+
+    X, y = prepare_multivariate_data(data_pca, n_steps)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # 构建模型
+    model = build_multivariate_model((n_steps, best_n_components))
+
+    # 训练模型
+    model.fit(X_train, y_train, epochs=20, verbose=1, validation_data=(X_test, y_test))
+
+    # 预测
+    y_pred = model.predict(X_test)
+
+    # 计算重建误差
+    reconstruction_errors = np.mean(np.abs(y_test - y_pred), axis=1)
+
+    # 设置阈值 (这里假设使用95%分位数作为阈值)
+    threshold = np.percentile(reconstruction_errors, 95)
+
+    # 评估模型
+    y_true = (reconstruction_errors > threshold).astype(int)
+    auc_score = roc_auc_score(y_true, reconstruction_errors)
+    fpr, tpr, _ = roc_curve(y_true, reconstruction_errors)
+
+    print(f'AUC Score: {auc_score}')
+
+    # 绘制ROC曲线
+    plt.figure(figsize=(12, 6))
+    plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {auc_score:.2f})')
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.show()
+
+    # 绘制结果
+    plt.figure(figsize=(15, 8))
+    for i in range(best_n_components):
+        plt.subplot(best_n_components, 1, i + 1)
+        plt.plot(y_test[:, i], label='True Feature {}'.format(i))
+        plt.plot(y_pred[:, i], label='Predicted Feature {}'.format(i))
+        plt.legend()
+    plt.show()
+
+    # 可视化重建误差和阈值
+    plt.figure(figsize=(12, 6))
+    plt.hist(reconstruction_errors, bins=50, alpha=0.75)
+    plt.axvline(threshold, color='r', linestyle='--', label='Threshold')
+    plt.xlabel('Reconstruction error')
+    plt.ylabel('Frequency')
+    plt.title('Reconstruction Error Histogram')
+    plt.legend()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
