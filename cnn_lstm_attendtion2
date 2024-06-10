@@ -1,0 +1,135 @@
+import keras.backend as K
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from keras.layers import Input, Dense, LSTM, Conv1D, Dropout, Bidirectional, Multiply, Flatten, Permute
+from keras.models import Model, load_model
+from sklearn.metrics import roc_auc_score, roc_curve, precision_score, recall_score, f1_score, accuracy_score
+from sklearn.model_selection import train_test_split
+
+# Data processing functions
+def create_dataset(dataset, look_back):
+    dataX, dataY = [], []
+    for i in range(len(dataset) - look_back - 1):
+        a = dataset[i:(i + look_back), :]
+        dataX.append(a)
+        dataY.append(dataset[i + look_back, :])
+    TrainX = np.array(dataX)
+    Train_Y = np.array(dataY)
+    return TrainX, Train_Y
+
+def NormalizeMult(data):
+    data = np.array(data)
+    normalize = np.zeros((data.shape[1], 2), dtype='float64')
+    for i in range(data.shape[1]):
+        list = data[:, i]
+        listlow, listhigh = np.percentile(list, [0, 100])
+        normalize[i, 0] = listlow
+        normalize[i, 1] = listhigh
+        delta = listhigh - listlow
+        if delta != 0:
+            for j in range(data.shape[0]):
+                data[j, i] = (data[j, i] - listlow) / delta
+    return data, normalize
+
+def attention_3d_block(inputs):
+    input_dim = int(inputs.shape[2])
+    a = Dense(input_dim, activation='softmax')(inputs)
+    a_probs = Permute((1, 2), name='attention_vec')(a)
+    output_attention_mul = Multiply()([inputs, a_probs])
+    return output_attention_mul
+
+def attention_model():
+    inputs = Input(shape=(TIME_STEPS, INPUT_DIMS))
+    x = Conv1D(filters=64, kernel_size=1, activation='relu')(inputs)
+    x = Dropout(0.3)(x)
+    lstm_out = Bidirectional(LSTM(lstm_units, return_sequences=True))(x)
+    lstm_out = Dropout(0.3)(lstm_out)
+    attention_mul = attention_3d_block(lstm_out)
+    attention_mul = Flatten()(attention_mul)
+    output = Dense(1, activation='sigmoid')(attention_mul)
+    model = Model(inputs=[inputs], outputs=output)
+    return model
+
+# Load data
+data = pd.read_csv("./pollution.csv")
+data = data.drop(['date', 'wnd_dir'], axis=1)
+
+INPUT_DIMS = 7
+TIME_STEPS = 20
+lstm_units = 64
+
+# Normalize
+data, normalize = NormalizeMult(data)
+pollution_data = data[:, 0].reshape(len(data), 1)
+
+# Create dataset
+train_X, _ = create_dataset(data, TIME_STEPS)
+_, train_Y = create_dataset(pollution_data, TIME_STEPS)
+
+# Ensure labels are binary
+train_Y = (train_Y > 0.5).astype(int)
+
+# Split the data into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(train_X, train_Y, test_size=0.2, random_state=42)
+
+# Build and compile the model
+model = attention_model()
+model.summary()
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# Train the model
+history = model.fit(X_train, y_train, epochs=20, batch_size=64, validation_split=0.1)
+
+# Save the model
+model.save('attention_model.h5')
+
+# Predict
+y_pred_prob = model.predict(X_test)
+y_pred = (y_pred_prob > 0.5).astype(int)
+
+# Compute evaluation metrics
+auc = roc_auc_score(y_test, y_pred_prob)
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print(f"AUC: {auc}")
+print(f"Accuracy: {accuracy}")
+print(f"Precision: {precision}")
+print(f"Recall: {recall}")
+print(f"F1 Score: {f1}")
+
+# Plot ROC curve
+fpr, tpr, thresholds = roc_curve(y_test, y_pred_prob)
+plt.figure()
+plt.plot(fpr, tpr, color='darkorange', lw=2, label='ROC curve (area = %0.2f)' % auc)
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc="lower right")
+plt.show()
+
+# Plot training & validation accuracy values
+plt.figure()
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.title('Model accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
+
+# Plot training & validation loss values
+plt.figure()
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('Model loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
